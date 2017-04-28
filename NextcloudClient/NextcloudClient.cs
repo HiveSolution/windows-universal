@@ -7,7 +7,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
-using Windows.Storage.Streams;
 using Windows.Web.Http;
 using Windows.Web.Http.Filters;
 using Newtonsoft.Json;
@@ -22,7 +21,7 @@ namespace NextcloudClient
     /// <summary>
     ///     Nextcloud OCS and DAV access client
     /// </summary>
-    public class NextcloudClient
+    public class NextcloudClient : IDisposable
     {
         #region PRIVATE PROPERTIES
 
@@ -128,7 +127,10 @@ namespace NextcloudClient
                     ));
             _client.DefaultRequestHeaders["Authorization"] = "Basic " + encoded;
 
-            _dav = new WebDavSession(_url, _httpBaseProtocolFilter);
+            _dav = new WebDavSession(_url, new System.Net.NetworkCredential(_httpBaseProtocolFilter.ServerCredential.UserName, _httpBaseProtocolFilter.ServerCredential.Password))
+            {
+                Timeout = Timeout.InfiniteTimeSpan
+            };
         }
 
         #endregion
@@ -175,6 +177,7 @@ namespace NextcloudClient
         public async Task<List<ResourceInfo>> List(string path)
         {
             var resources = new List<ResourceInfo>();
+            var test = GetDavUri(path);
             var result = await _dav.ListAsync(GetDavUri(path));
 
             var baseUri = new Uri(_url);
@@ -210,48 +213,165 @@ namespace NextcloudClient
         /// </summary>
         /// <returns>The resource info.</returns>
         /// <param name="path">remote Path.</param>
-        public async Task<ResourceInfo> GetResourceInfo(string path)
+        /// <param name="name">name of resource to get</param>
+        public async Task<ResourceInfo> GetResourceInfo(string path, string name)
         {
             var baseUri = new Uri(_url);
             baseUri = new Uri(baseUri, baseUri.AbsolutePath + (baseUri.AbsolutePath.EndsWith("/") ? "" : "/") + Davpath);
-            
+
             var result = await _dav.ListAsync(GetDavUri(path));
 
             if (result.Count <= 0)
             {
                 return null;
             }
-            var item = result[0];
-            var res = new ResourceInfo
+            foreach (var item in result)
             {
-                ContentType = item.IsCollection ? "dav/directory" : item.ContentType,
-                Created = item.CreationDate,
-                ETag = item.ETag,
-                LastModified = item.LastModified,
-                Name = System.Net.WebUtility.UrlDecode(item.Name),
-                QuotaAvailable = item.QuotaAvailableBytes,
-                QuotaUsed = item.QuotaUsedBytes,
-                Size = item.ContentLength,
-                Path = item.Uri.AbsolutePath.Replace(baseUri.AbsolutePath, "")
-            };
-            if (!res.ContentType.Equals("dav/directory"))
-            {
-                // if resource not a directory, remove the file name from remote path.
-                res.Path = res.Path.Replace("/" + res.Name, "");
+                if (item.Name.Equals(name))
+                {
+                    var res = new ResourceInfo
+                    {
+                        ContentType = item.IsCollection ? "dav/directory" : item.ContentType,
+                        Created = item.CreationDate,
+                        ETag = item.ETag,
+                        LastModified = item.LastModified,
+                        Name = System.Net.WebUtility.UrlDecode(item.Name),
+                        QuotaAvailable = item.QuotaAvailableBytes,
+                        QuotaUsed = item.QuotaUsedBytes,
+                        Size = item.ContentLength,
+                        Path = item.Uri.AbsolutePath.Replace(baseUri.AbsolutePath, "")
+                    };
+                    if (!res.ContentType.Equals("dav/directory"))
+                    {
+                        // if resource not a directory, remove the file name from remote path.
+                        res.Path = res.Path.Replace("/" + res.Name, "");
+                    }
+                    return res;
+                }
             }
-            return res;
+            return null;
+        }
+
+
+        /// <summary>
+        ///     Finds remote outgoing shares.
+        /// </summary>
+        /// <returns>List of shares.</returns>
+        public async Task<List<ResourceInfo>> GetSharesView(string viewname)
+        {
+            var param = new Tuple<string, string>("shared_with_me", "false");
+            if (viewname == "sharesIn") param = new Tuple<string, string>("shared_with_me", "true");
+            var shares = await GetShares(param);
+
+            List<ResourceInfo> sharesList = new List<ResourceInfo>();
+
+            foreach (var item in shares)
+            {
+                try
+                {
+                    var itemShare = await GetResourceInfoByPath(item.Path);
+
+                    sharesList.Add(itemShare);
+                }
+                catch (ResponseError e)
+                {
+                    throw e;
+                }
+            }
+
+            return sharesList;
+        }
+
+        /// <summary>
+        ///     Finds user favorites.
+        /// </summary>
+        /// <returns>List of favorites.</returns>
+        public async Task<List<ResourceInfo>> GetFavorites()
+        {
+            var url = new UrlBuilder(_url + "/remote.php/webdav");
+
+            // See: https://docs.nextcloud.com/server/12/developer_manual/client_apis/WebDAV/index.html#listing-favorites
+            // Also, for Props see: https://docs.nextcloud.com/server/12/developer_manual/client_apis/WebDAV/index.html
+            var content = "<?xml version=\"1.0\"?>"
+                + "<oc:filter-files  xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\" xmlns:nc=\"http://nextcloud.org/ns\">"
+                    + "<d:prop>"
+                        + "<oc:favorite />"
+                    + "</d:prop>"
+                    + "<oc:filter-rules>"
+                        + "<oc:favorite>1</oc:favorite>"
+                    + "</oc:filter-rules>"
+                + "</oc:filter-files>";
+
+            var request = new HttpRequestMessage(new HttpMethod("REPORT"), url.ToUri())
+            {
+                Content = new HttpStringContent(content, Windows.Storage.Streams.UnicodeEncoding.Utf8, "application/xml")
+            };
+
+            var response = await _client.SendRequestAsync(request);
+
+            var xDoc = XDocument.Parse(response.Content.ToString());
+
+            List<ResourceInfo> favoritesList = new List<ResourceInfo>();
+
+            foreach (XElement element in xDoc.Descendants())
+            {
+                if (element.ToString().IndexOf("d:href") > -1 && element.ToString().IndexOf("d:response") < 0 )
+                {
+                    var favoritePath = element.ToString().Replace("<d:href xmlns:d=\"DAV:\">/remote.php/webdav", "").Replace("</d:href>", "");
+
+                    try
+                    {
+                        var itemFav = await GetResourceInfoByPath(Uri.UnescapeDataString(favoritePath));
+
+                        favoritesList.Add(itemFav);
+                    }
+                    catch (ResponseError e)
+                    {
+                        throw e;
+                    }
+                }
+            }
+
+            return favoritesList;
+        }
+
+        /// <summary>
+        ///     Finds resource info for item by searching its parent.
+        /// </summary>
+        /// <returns>Resource Info if given item.</returns>
+        /// <param name="Path">Path to the Item.</param>
+        private async Task<ResourceInfo> GetResourceInfoByPath(string Path)
+        {
+
+            var targetPath = "/" + Path.Split('/')[Path.Split('/').Length - 1];
+            var parentPath = Path.Replace(targetPath, "/");
+            var itemName = targetPath.Replace("/", "");
+
+            var parentResource = await List(parentPath);
+            var itemResource = new ResourceInfo();
+
+            foreach (var item in parentResource)
+            {
+                if (item.Name == itemName)
+                {
+                    itemResource = item;
+                }
+            }
+
+            return itemResource;
         }
 
         /// <summary>
         ///     Download the specified file.
         /// </summary>
         /// <param name="path">File remote Path.</param>
-        /// <param name="cts"></param>
+        /// <param name="localStream"></param>
+        /// <param name="cancellationToken"></param>
         /// <param name="progress"></param>
         /// <returns>File contents.</returns>
-        public async Task<IBuffer> Download(string path, CancellationTokenSource cts, IProgress<HttpProgress> progress)
+        public async Task<bool> Download(string path, Stream localStream, IProgress<WebDavProgress> progress, CancellationToken cancellationToken)
         {
-            return await _dav.DownloadFileAsync(GetDavUri(path), cts, progress);
+            return await _dav.DownloadFileWithProgressAsync(GetDavUri(path), localStream, progress, cancellationToken);
         }
 
         /// <summary>
@@ -294,13 +414,12 @@ namespace NextcloudClient
         /// <param name="path">remote Path.</param>
         /// <param name="stream"></param>
         /// <param name="contentType">File content type.</param>
-        /// <param name="cts"></param>
+        /// <param name="cancellationToken"></param>
         /// <param name="progress"></param>
         /// <returns><c>true</c>, if upload successful, <c>false</c> otherwise.</returns>
-        public async Task<bool> Upload(string path, IRandomAccessStream stream, string contentType,
-            CancellationTokenSource cts, IProgress<HttpProgress> progress)
+        public async Task<bool> Upload(string path, Stream stream, string contentType, IProgress<WebDavProgress> progress, CancellationToken cancellationToken)
         {
-            return await _dav.UploadFileAsync(GetDavUri(path), stream, contentType, cts, progress);
+            return await _dav.UploadFileWithProgressAsync(GetDavUri(path), stream, contentType, progress, cancellationToken);
         }
 
         /// <summary>
@@ -359,13 +478,14 @@ namespace NextcloudClient
         ///     Downloads a remote directory as zip.
         /// </summary>
         /// <param name="path">File remote Path.</param>
-        /// <param name="cts"></param>
+        /// <param name="localStream"></param>
+        /// <param name="cancellationToken"></param>
         /// <param name="progress"></param>
         /// <returns>File contents.</returns>
         //public async Task<IBuffer> Download(string path, CancellationTokenSource cts, IProgress<HttpProgress> progress)
-        public async Task<IBuffer> DownloadDirectoryAsZip(string path, CancellationTokenSource cts, IProgress<HttpProgress> progress)
+        public async Task<bool> DownloadDirectoryAsZip(string path, Stream localStream, IProgress<WebDavProgress> progress, CancellationToken cancellationToken)
         {
-            return await _dav.DownloadFileAsync(GetDavUriZip(path), cts, progress);
+            return await _dav.DownloadFileWithProgressAsync(GetDavUriZip(path), localStream, progress, cancellationToken);
         }
 
         #endregion
@@ -489,7 +609,7 @@ namespace NextcloudClient
         /// <returns></returns>
         public static async Task<bool> CheckUserLogin(string serverUrl, string userId, string password, bool ignoreServerCertificateErrors)
         {
-            if (serverUrl == null)
+            if (string.IsNullOrEmpty(serverUrl) || string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(password))
             {
                 return false;
             }
@@ -545,6 +665,23 @@ namespace NextcloudClient
             var response = await DoApiRequest(
                 "GET",
                 "/" + GetOcsPath(OcsServiceShare, "remote_shares")
+                );
+
+            //Debug.Assert(response.StatusCode == HttpStatusCode.OK);
+
+            // TODO: Parse response
+            return response;
+        }
+
+        /// <summary>
+        ///     List all remote shares.
+        /// </summary>
+        /// <returns>List of remote shares.</returns>
+        public async Task<object> ListShare()
+        {
+            var response = await DoApiRequest(
+                "GET",
+                "/" + GetOcsPath(OcsServiceShare, "shares")
                 );
 
             //Debug.Assert(response.StatusCode == HttpStatusCode.OK);
@@ -854,7 +991,7 @@ namespace NextcloudClient
         /// <param name="path">path to the share to be checked.</param>
         public async Task<bool> IsShared(string path)
         {
-            var result = await GetShares(path);
+            var result = await GetShares(new Tuple<string, string>("path", path));
             return result.Count > 0;
         }
 
@@ -866,15 +1003,16 @@ namespace NextcloudClient
         /// <param name="path">(optional) path to the share to be checked.</param>
         /// <param name="reshares">(optional) returns not only the shares from	the current user but all shares from the given file.</param>
         /// <param name="subfiles">(optional) returns all shares within	a folder, given that path defines a folder.</param>
-        public async Task<List<Share>> GetShares(string path, OcsBoolParam reshares = OcsBoolParam.None,
+        public async Task<List<Share>> GetShares(Tuple<string, string> tParam, OcsBoolParam reshares = OcsBoolParam.None,
             OcsBoolParam subfiles = OcsBoolParam.None)
         {
             var parameters = new Dictionary<string, string>();
 
-            if (!string.IsNullOrEmpty(path))
+            if (tParam != null)
             {
-                parameters.Add("path", path);
+                parameters.Add(tParam.Item1, tParam.Item2);
             }
+
             switch (reshares)
             {
                 case OcsBoolParam.True:
@@ -1642,7 +1780,7 @@ namespace NextcloudClient
                     {
                         foreach (var parameter in parameters)
                         {
-                            url.AddQueryParameter(parameter.Value, parameter.Value);
+                            url.AddQueryParameter(parameter.Key, parameter.Value);
                         }
                     }
                     _client.DefaultRequestHeaders["OCS-APIREQUEST"] = "true";
@@ -1815,6 +1953,12 @@ namespace NextcloudClient
                 if (node != null)
                 {
                     share.TargetPath = node.Value;
+                }
+
+                node = data.Element(XName.Get("path"));
+                if (node != null)
+                {
+                    share.Path = node.Value;
                 }
 
                 node = data.Element(XName.Get("permissions"));
@@ -2208,5 +2352,23 @@ namespace NextcloudClient
         }
 
         #endregion
+
+        #region IDisposable
+
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        private void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _dav?.Dispose();
+            }
+        }
+
+        #endregion IDisposable
     }
 }

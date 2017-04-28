@@ -21,8 +21,8 @@ namespace NextcloudApp.ViewModels
     public class MenuViewModel : ViewModel
     {
         private const string CurrentPageTokenKey = "CurrentPageToken";
-        private readonly Dictionary<PageTokens, bool> _canNavigateLookup;
-        private PageTokens _currentPageToken;
+        private readonly Dictionary<PageToken, bool> _canNavigateLookup;
+        private PageToken _currentPageToken;
         private readonly INavigationService _navigationService;
         private readonly ISessionStateService _sessionStateService;
         private bool _showMenuButton;
@@ -44,23 +44,69 @@ namespace NextcloudApp.ViewModels
                     DisplayName = resourceLoader.GetString("AllFiles"),
                     FontIcon = "\uE8B7",
                     Command = new DelegateCommand(
-                        () => NavigateToPage(PageTokens.DirectoryList),
-                        () => CanNavigateToPage(PageTokens.DirectoryList)
+                        () => NavigateToPage(PageToken.DirectoryList),
+                        () => CanNavigateToPage(PageToken.DirectoryList)
                     )
                 },
+                new MenuItem
+                {
+                    DisplayName = resourceLoader.GetString("Favorites"),
+                    FontIcon = "\uE734",
+                    Command = new DelegateCommand(
+                        () => NavigateToPage(PageToken.Favorites),
+                        () => CanNavigateToPage(PageToken.Favorites)
+                    )
+                },
+                new MenuItem
+                {
+                    DisplayName = resourceLoader.GetString("SharingIn"),
+                    FontIcon = "\uF003",
+                    Command = new DelegateCommand(
+                        () => NavigateToPage(PageToken.SharesIn),
+                        () => CanNavigateToPage(PageToken.SharesIn)
+                    )
+                },
+                new MenuItem
+                {
+                    DisplayName = resourceLoader.GetString("SharingOut"),
+                    FontIcon = "\uF003",
+                    Command = new DelegateCommand(
+                        () => NavigateToPage(PageToken.SharesOut),
+                        () => CanNavigateToPage(PageToken.SharesOut)
+                    )
+                },
+                //new MenuItem
+                //{
+                //    DisplayName = resourceLoader.GetString("SharingLink"),
+                //    FontIcon = "\uE167",
+                //    Command = new DelegateCommand(
+                //        () => NavigateToPage(PageToken.SharesLink),
+                //        () => CanNavigateToPage(PageToken.SharesLink)
+                //    )
+                //},
+                
             };
 
             ExtraCommands = new ObservableCollection<MenuItem>
             {
+                 new MenuItem
+                {
+                    DisplayName = resourceLoader.GetString("SynchronizationStatus/Header"),
+                    FontIcon = "\uE895",
+                    Command = new DelegateCommand(
+                        () => NavigateToPage(PageToken.SyncStatus),
+                        () => CanNavigateToPage(PageToken.SyncStatus)
+                    )
+                },
                 new MenuItem
                 {
                     DisplayName = resourceLoader.GetString("Settings"),
                     FontIcon = "\uE713",
                     Command = new DelegateCommand(
-                        () => NavigateToPage(PageTokens.Settings),
-                        () => CanNavigateToPage(PageTokens.Settings)
+                        () => NavigateToPage(PageToken.Settings),
+                        () => CanNavigateToPage(PageToken.Settings)
                     )
-                },
+                },               
             };
             
             SettingsService.Instance.LocalSettings.PropertyChanged += (sender, args) =>
@@ -69,9 +115,9 @@ namespace NextcloudApp.ViewModels
             };
             GetUserInformation();
 
-            _canNavigateLookup = new Dictionary<PageTokens, bool>();
+            _canNavigateLookup = new Dictionary<PageToken, bool>();
 
-            foreach (PageTokens pageToken in Enum.GetValues(typeof(PageTokens)))
+            foreach (PageToken pageToken in Enum.GetValues(typeof(PageToken)))
             {
                 _canNavigateLookup.Add(pageToken, true);
             }
@@ -81,7 +127,7 @@ namespace NextcloudApp.ViewModels
                 return;
             }
             // Resuming, so update the menu to reflect the current page correctly
-            PageTokens currentPageToken;
+            PageToken currentPageToken;
             if (!Enum.TryParse(_sessionStateService.SessionState[CurrentPageTokenKey].ToString(), out currentPageToken))
             {
                 return;
@@ -162,7 +208,7 @@ namespace NextcloudApp.ViewModels
 
         private void OnNavigationStateChanged(NavigationStateChangedEventArgs args)
         {
-            PageTokens currentPageToken;
+            PageToken currentPageToken;
             if (!Enum.TryParse(args.Sender.Content.GetType().Name.Replace("Page", string.Empty), out currentPageToken))
             {
                 return;
@@ -172,7 +218,7 @@ namespace NextcloudApp.ViewModels
             RaiseCanExecuteChanged();
         }
 
-        private void NavigateToPage(PageTokens pageToken)
+        private void NavigateToPage(PageToken pageToken)
         {
             if (!CanNavigateToPage(pageToken))
             {
@@ -186,12 +232,12 @@ namespace NextcloudApp.ViewModels
             RaiseCanExecuteChanged();
         }
 
-        private bool CanNavigateToPage(PageTokens pageToken)
+        private bool CanNavigateToPage(PageToken pageToken)
         {
             return _canNavigateLookup[pageToken];
         }
 
-        private void UpdateCanNavigateLookup(PageTokens navigatedTo)
+        private void UpdateCanNavigateLookup(PageToken navigatedTo)
         {
             if (navigatedTo == _currentPageToken)
             {
@@ -201,9 +247,9 @@ namespace NextcloudApp.ViewModels
             _canNavigateLookup[navigatedTo] = false;
             _currentPageToken = navigatedTo;
             ShowMenuButton = 
-                _currentPageToken != PageTokens.Login &&
-                _currentPageToken != PageTokens.SingleFileDownload &&
-                _currentPageToken != PageTokens.FileUpload;
+                _currentPageToken != PageToken.Login &&
+                _currentPageToken != PageToken.FileDownload &&
+                _currentPageToken != PageToken.FileUpload;
             IsMenuOpen = false;
         }
 
